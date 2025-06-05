@@ -1,29 +1,156 @@
+import 'dart:convert';
 import 'package:fasum/firebase_options.dart';
 import 'package:fasum/screens/splash_screen.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:http/http.dart' as http;
+import 'package:provider/provider.dart';
+import 'helper/locale_provider.dart';
+import 'l10n/app_localizations.dart';
+
+final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
+    FlutterLocalNotificationsPlugin();
+
+Future<void> requestNotificationPermission() async {
+  FirebaseMessaging messaging = FirebaseMessaging.instance;
+  NotificationSettings settings = await messaging.requestPermission(
+    alert: true,
+    badge: true,
+    sound: true,
+  );
+
+  if (settings.authorizationStatus == AuthorizationStatus.authorized) {
+    print('Izin notifikasi diberikan');
+  } else if (settings.authorizationStatus == AuthorizationStatus.provisional) {
+    print('Izin notifikasi sementara diberikan');
+  } else {
+    print('Izin notifikasi ditolak');
+  }
+}
+
+Future<void> showBasicNotification(String? title, String? body) async {
+  final android = AndroidNotificationDetails(
+    'default_channel',
+    'Notifikasi Default',
+    channelDescription: 'Notifikasi masuk dari FCM',
+    importance: Importance.high,
+    priority: Priority.high,
+    showWhen: true,
+  );
+  final platform = NotificationDetails(android: android);
+  await flutterLocalNotificationsPlugin.show(0, title, body, platform);
+}
+
+Future<void> showNotificationFromData(Map<String, dynamic> data) async {
+  final title = data['title'] ?? 'Pesan Baru';
+  final body = data['body'] ?? '';
+  final sender = data['senderName'] ?? 'Pengirim tidak diketahui';
+  final time = data['sentAt'] ?? '';
+  final photoUrl = data['senderPhotoUrl'] ?? '';
+
+  final androidDetails = AndroidNotificationDetails(
+    'detailed_channel',
+    'Notifikasi Detail',
+    channelDescription: 'Notifikasi dengan detail tambahan',
+    styleInformation: BigTextStyleInformation(
+      '$body\n\nDari: $sender\nWaktu: $time',
+      contentTitle: title,
+    ),
+    largeIcon:
+        photoUrl.isNotEmpty
+            ? ByteArrayAndroidBitmap.fromBase64String(
+              (await _networkImageToBase64(photoUrl)) ?? '',
+            )
+            : null,
+    importance: Importance.max,
+    priority: Priority.max,
+  );
+
+  final platform = NotificationDetails(android: androidDetails);
+  await flutterLocalNotificationsPlugin.show(1, title, body, platform);
+}
+
+Future<String?> _networkImageToBase64(String url) async {
+  try {
+    final response = await http.get(Uri.parse(url));
+    if (response.statusCode == 200) {
+      return base64Encode(response.bodyBytes);
+    }
+  } catch (_) {}
+  return null;
+}
+
+Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  await Firebase.initializeApp();
+  if (message.data.isNotEmpty) {
+    await showNotificationFromData(message.data);
+  } else {
+    await showBasicNotification(
+      message.notification!.title,
+      message.notification!.body,
+    );
+  }
+}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp(
-    options: DefaultFirebaseOptions.currentPlatform,
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  await requestNotificationPermission();
+
+  FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+
+  const AndroidInitializationSettings androidInit =
+      AndroidInitializationSettings('@mipmap/ic_launcher');
+  final InitializationSettings settings = InitializationSettings(
+    android: androidInit,
+    iOS: DarwinInitializationSettings(),
   );
-  runApp(const MyApp());
+  await flutterLocalNotificationsPlugin.initialize(settings);
+
+  runApp(MyApp());
 }
 
 class MyApp extends StatelessWidget {
-  const MyApp({super.key});
-
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'Fasum',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.green),
-        useMaterial3: true,
-      ),
-      home: SplashScreen(),
+    return ChangeNotifierProvider(
+      create: (_) => LocaleProvider(),
+      builder: (context, child) {
+        final provider = Provider.of<LocaleProvider>(context);
+        return MaterialApp(
+          locale: provider.locale,
+          supportedLocales: AppLocalizations.supportedLocales,
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          debugShowCheckedModeBanner: false,
+          title: 'Fasum',
+          theme: ThemeData(
+            colorScheme: ColorScheme.fromSeed(seedColor: Colors.green),
+            useMaterial3: true,
+          ),
+          home: SplashScreen(),
+        );
+      },
     );
   }
+}
+
+void setupFirebaseMessaging() async {
+  String? token = await FirebaseMessaging.instance.getToken();
+  print("FCM Token: $token");
+
+  FirebaseMessaging messaging = FirebaseMessaging.instance;
+  await messaging.subscribeToTopic("berita-fasum");
+
+  FirebaseMessaging.onMessage.listen((RemoteMessage message) {
+    if (message.data.isNotEmpty) {
+      showNotificationFromData(message.data);
+    } else {
+      showBasicNotification(
+        message.notification?.title,
+        message.notification?.body,
+      );
+    }
+  });
 }
